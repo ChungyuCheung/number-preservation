@@ -43,7 +43,30 @@ const HTML_CONTENT = `<!DOCTYPE html>
 </head>
 <body class="text-gray-800 font-sans p-4 md:p-8 relative">
 
-    <div class="max-w-6xl mx-auto glass-panel rounded-3xl p-6 md:p-10 mt-4 md:mt-8">
+    <!-- 登录界面 (默认显示，未授权时拦截) -->
+    <div id="login-container" class="max-w-md mx-auto glass-panel rounded-3xl p-8 md:p-10 mt-16 md:mt-32 text-center transition-all">
+        <div class="w-20 h-20 bg-white/50 rounded-full flex items-center justify-center mx-auto mb-6 shadow-sm">
+            <i class="fa-solid fa-shield-halved text-4xl text-blue-600"></i>
+        </div>
+        <h2 class="text-3xl font-extrabold text-gray-900 mb-2">安全验证</h2>
+        <p class="text-gray-600 mb-8 text-sm font-medium">为保护您的卡片资产，请获取验证码登录。</p>
+        
+        <div class="mb-6 relative">
+            <input type="text" id="authCode" placeholder="输入 6 位数验证码" maxlength="6" class="w-full px-4 py-4 rounded-xl border border-gray-300/50 text-center text-2xl tracking-[0.5em] font-mono focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white/70 shadow-inner placeholder-gray-400 placeholder:tracking-normal placeholder:text-base">
+        </div>
+        
+        <div class="flex flex-col gap-4 mt-8">
+            <button id="loginBtn" onclick="verifyCode()" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3.5 px-4 rounded-xl shadow-lg transition-colors flex items-center justify-center gap-2">
+                <i class="fa-solid fa-arrow-right-to-bracket"></i> 登录面板
+            </button>
+            <button id="sendCodeBtn" onclick="sendAuthCode()" class="w-full bg-white/60 hover:bg-white/80 text-blue-700 font-bold py-3.5 px-4 rounded-xl border border-blue-200/50 transition-colors flex items-center justify-center gap-2">
+                <i class="fa-brands fa-telegram text-xl"></i> 向 TG 机器人获取验证码
+            </button>
+        </div>
+    </div>
+
+    <!-- 主界面容器 (默认隐藏，登录成功后显示) -->
+    <div id="main-container" class="max-w-6xl mx-auto glass-panel rounded-3xl p-6 md:p-10 mt-4 md:mt-8 hidden">
         <!-- 头部信息 -->
         <div class="flex flex-col md:flex-row justify-between items-center mb-10 border-b border-white/50 pb-6 gap-4">
             <div>
@@ -53,12 +76,15 @@ const HTML_CONTENT = `<!DOCTYPE html>
                 </h1>
                 <p class="text-gray-700 mt-2 font-medium">自动监控卡片有效期，15天内触发 Telegram 提醒。</p>
             </div>
-            <div class="flex gap-3 items-center">
+            <div class="flex gap-3 items-center flex-wrap justify-center">
                 <span class="text-sm bg-white/50 px-4 py-2 rounded-full font-semibold shadow-sm hidden md:inline-block">
                     今日：<span id="current-date" class="text-blue-700">...</span>
                 </span>
                 <button onclick="openModal()" class="bg-blue-600 hover:bg-blue-700 text-white px-5 py-2.5 rounded-full font-bold shadow-lg transition-colors flex items-center gap-2">
                     <i class="fa-solid fa-plus"></i> 添加号码
+                </button>
+                <button onclick="logout()" class="bg-red-50 hover:bg-red-100 text-red-600 px-4 py-2.5 rounded-full font-bold shadow-sm transition-colors flex items-center gap-2 border border-red-200" title="退出登录">
+                    <i class="fa-solid fa-right-from-bracket"></i>
                 </button>
             </div>
         </div>
@@ -71,7 +97,7 @@ const HTML_CONTENT = `<!DOCTYPE html>
         <!-- 卡片列表容器 -->
         <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6" id="esim-container">
             <div class="col-span-full text-center py-10 text-gray-700 font-medium text-lg" id="loading-text">
-                <i class="fa-solid fa-spinner fa-spin mr-2"></i> 正在连接数据库...
+                <i class="fa-solid fa-spinner fa-spin mr-2"></i> 正在读取数据...
             </div>
         </div>
     </div>
@@ -111,31 +137,133 @@ const HTML_CONTENT = `<!DOCTYPE html>
     </div>
 
     <script>
-        // ==========================================
-        // 因为前端和后端在同一个域名下，所以直接使用相对路径即可调用 API！
-        // ==========================================
+        // API 路由前缀
         const WORKER_API_URL = "/api/esims";
-        
         let esimData = []; 
+        let countdownInterval;
 
         document.getElementById('current-date').innerText = new Date().toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' });
-        fetchEsimData();
+        
+        // 页面加载时，检查是否已有有效 token，如果有直接尝试获取数据
+        window.onload = () => {
+            if (localStorage.getItem('esim_auth_token')) {
+                fetchEsimData();
+            }
+        };
 
+        // 统一获取携带 Auth 头的请求配置
+        function getAuthHeaders() {
+            return {
+                'Content-Type': 'application/json',
+                'Authorization': localStorage.getItem('esim_auth_token') || ''
+            };
+        }
+
+        // ================= 安全验证相关功能 =================
+        async function sendAuthCode() {
+            const btn = document.getElementById('sendCodeBtn');
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin mr-2"></i> 发送中...';
+            
+            try {
+                const response = await fetch('/api/auth/send', { method: 'POST' });
+                const data = await response.json();
+                
+                if (response.ok && data.success) {
+                    let timeLeft = 60;
+                    btn.innerHTML = \`<i class="fa-solid fa-clock mr-2"></i> \${timeLeft} 秒后可重发\`;
+                    countdownInterval = setInterval(() => {
+                        timeLeft--;
+                        if (timeLeft <= 0) {
+                            clearInterval(countdownInterval);
+                            btn.disabled = false;
+                            btn.innerHTML = '<i class="fa-brands fa-telegram text-xl mr-2"></i> 向 TG 机器人获取验证码';
+                        } else {
+                            btn.innerHTML = \`<i class="fa-solid fa-clock mr-2"></i> \${timeLeft} 秒后可重发\`;
+                        }
+                    }, 1000);
+                } else {
+                    alert("发送失败: " + (data.message || "后端未配置机器人信息"));
+                    btn.disabled = false;
+                    btn.innerHTML = '<i class="fa-brands fa-telegram text-xl mr-2"></i> 向 TG 机器人获取验证码';
+                }
+            } catch (e) {
+                alert("网络错误，发送失败");
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fa-brands fa-telegram text-xl mr-2"></i> 向 TG 机器人获取验证码';
+            }
+        }
+
+        async function verifyCode() {
+            const codeInput = document.getElementById('authCode').value.trim();
+            if (!codeInput || codeInput.length !== 6) return alert("请输入完整的 6 位数字验证码");
+            
+            const btn = document.getElementById('loginBtn');
+            const originalHTML = btn.innerHTML;
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin mr-2"></i> 验证中...';
+            
+            try {
+                const response = await fetch('/api/auth/verify', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ code: codeInput })
+                });
+                const data = await response.json();
+                
+                if (response.ok && data.success) {
+                    // 保存持久化登录 Token
+                    localStorage.setItem('esim_auth_token', data.token);
+                    document.getElementById('authCode').value = '';
+                    fetchEsimData(); // 拉取数据并显示主界面
+                } else {
+                    alert("登录失败: " + (data.message || "验证码错误或已过期"));
+                    btn.disabled = false;
+                    btn.innerHTML = originalHTML;
+                }
+            } catch (e) {
+                alert("网络错误，验证失败");
+                btn.disabled = false;
+                btn.innerHTML = originalHTML;
+            }
+        }
+
+        function logout() {
+            localStorage.removeItem('esim_auth_token');
+            document.getElementById('login-container').classList.remove('hidden');
+            document.getElementById('main-container').classList.add('hidden');
+        }
+
+        // ================= 核心业务相关功能 =================
         async function fetchEsimData() {
             const container = document.getElementById('esim-container');
             container.innerHTML = \`<div class="col-span-full text-center py-10 text-gray-700 font-medium text-lg"><i class="fa-solid fa-spinner fa-spin mr-2"></i> 正在加载数据...</div>\`;
+            
             try {
-                const response = await fetch(WORKER_API_URL);
+                const response = await fetch(WORKER_API_URL, { headers: getAuthHeaders() });
+                
+                // 拦截未授权或 Token 失效
+                if (response.status === 401) {
+                    logout();
+                    return;
+                }
+
                 if (!response.ok) throw new Error("网络请求失败");
+                
                 esimData = await response.json();
+                
+                // 成功后切换界面
+                document.getElementById('login-container').classList.add('hidden');
+                document.getElementById('main-container').classList.remove('hidden');
+                
                 renderCards(esimData);
             } catch (error) {
                 console.error("加载失败:", error);
                 container.innerHTML = \`
                     <div class="col-span-full text-center py-10">
                         <i class="fa-solid fa-triangle-exclamation text-4xl text-red-500 mb-3"></i>
-                        <h3 class="text-xl font-bold text-gray-800">连接数据库失败</h3>
-                        <p class="text-gray-600 mt-2">系统内部错误，请检查 Cloudflare KV 绑定状态。</p>
+                        <h3 class="text-xl font-bold text-gray-800">获取数据失败</h3>
+                        <p class="text-gray-600 mt-2">网络异常，请重试。</p>
                     </div>\`;
             }
         }
@@ -275,15 +403,16 @@ const HTML_CONTENT = `<!DOCTYPE html>
             try {
                 const response = await fetch(WORKER_API_URL, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: getAuthHeaders(),
                     body: JSON.stringify(payload)
                 });
                 
+                if (response.status === 401) { logout(); return; }
                 if (response.ok) {
                     closeModal();
                     await fetchEsimData(); 
                 } else {
-                    alert("保存失败，请检查 Worker 配置。");
+                    alert("保存失败，请检查数据。");
                 }
             } catch (error) {
                 alert("网络错误，保存失败。");
@@ -293,7 +422,6 @@ const HTML_CONTENT = `<!DOCTYPE html>
             }
         }
 
-        // 一键续期功能
         async function renewEsim(id, cycle) {
             if (!cycle || cycle === 0) {
                 alert("该卡片未设置保号周期，无法自动计算日期。请删除后重新添加。");
@@ -301,7 +429,6 @@ const HTML_CONTENT = `<!DOCTYPE html>
             }
             if (!confirm("确定已保号并一键续期吗？\\n\\n系统将以【今天】为基准，往后顺延 " + cycle + " 天作为新的到期日。")) return;
             
-            // 计算基于今天的新日期
             const newDate = new Date();
             newDate.setDate(newDate.getDate() + parseInt(cycle));
             const year = newDate.getFullYear();
@@ -312,10 +439,11 @@ const HTML_CONTENT = `<!DOCTYPE html>
             try {
                 const response = await fetch(WORKER_API_URL, {
                     method: 'PUT',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: getAuthHeaders(),
                     body: JSON.stringify({ id: id, expireDate: newExpireStr })
                 });
                 
+                if (response.status === 401) { logout(); return; }
                 if (response.ok) {
                     await fetchEsimData(); 
                 } else {
@@ -332,10 +460,11 @@ const HTML_CONTENT = `<!DOCTYPE html>
             try {
                 const response = await fetch(WORKER_API_URL, {
                     method: 'DELETE',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: getAuthHeaders(),
                     body: JSON.stringify({ id: id })
                 });
                 
+                if (response.status === 401) { logout(); return; }
                 if (response.ok) {
                     await fetchEsimData(); 
                 } else {
@@ -378,6 +507,18 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const path = url.pathname;
+    
+    // 设置跨域请求头
+    const corsHeaders = {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    };
+
+    // 预检请求直接放行
+    if (request.method === "OPTIONS") {
+      return new Response(null, { headers: corsHeaders });
+    }
 
     // 路由 1：如果访问的是根目录 (网址首页)，直接返回 HTML 网页
     if (path === "/" || path === "/index.html") {
@@ -386,18 +527,74 @@ export default {
       });
     }
 
-    // 路由 2：如果访问的是 API 接口 (/api/esims)，则处理数据库数据
-    if (path === "/api/esims") {
-      const corsHeaders = {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type",
-      };
+    // 路由 2：触发发送动态验证码到 Telegram
+    if (path === "/api/auth/send" && request.method === "POST") {
+      try {
+        if (!env.TG_BOT_TOKEN || !env.TG_CHAT_ID) {
+          return new Response(JSON.stringify({ success: false, message: "后端环境变量未配置" }), { status: 500, headers: corsHeaders });
+        }
+        
+        // 生成 6 位纯数字验证码
+        const code = Math.floor(100000 + Math.random() * 900000).toString();
+        // 将验证码存入 KV，设置 5 分钟后自动过期 (TTL: 300秒)
+        await env.ESIM_DB.put("admin_auth_code", code, { expirationTtl: 300 });
 
-      if (request.method === "OPTIONS") {
-        return new Response(null, { headers: corsHeaders });
+        // 发送 TG 消息
+        const text = `🔐 <b>【eSIM 看板安全验证】</b>\n\n有人正在尝试登录您的网页版数据面板。\n\n您的动态登录验证码是：<code>${code}</code>\n\n<i>(该验证码 5 分钟内有效，请勿泄露)</i>`;
+        const tgUrl = `https://api.telegram.org/bot${env.TG_BOT_TOKEN}/sendMessage`;
+        const tgRes = await fetch(tgUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ chat_id: env.TG_CHAT_ID, text: text, parse_mode: "HTML" })
+        });
+
+        if (tgRes.ok) {
+          return new Response(JSON.stringify({ success: true }), { headers: corsHeaders });
+        } else {
+          return new Response(JSON.stringify({ success: false, message: "TG 消息发送失败，可能 Bot 被拉黑或未激活" }), { status: 500, headers: corsHeaders });
+        }
+      } catch (err) {
+        return new Response(JSON.stringify({ success: false, message: err.message }), { status: 500, headers: corsHeaders });
+      }
+    }
+
+    // 路由 3：校验验证码并颁发 Session Token
+    if (path === "/api/auth/verify" && request.method === "POST") {
+      try {
+        const { code } = await request.json();
+        const storedCode = await env.ESIM_DB.get("admin_auth_code");
+        
+        if (code && storedCode === code.toString()) {
+          // 验证通过，生成一个随机的长字符串作为 Token
+          const token = crypto.randomUUID();
+          // 将 Token 存入 KV，允许免密登录 30 天 (TTL: 2592000秒)
+          await env.ESIM_DB.put("session_token_" + token, "valid", { expirationTtl: 2592000 });
+          // 用完立刻销毁旧验证码，防止二次利用
+          await env.ESIM_DB.delete("admin_auth_code");
+          
+          return new Response(JSON.stringify({ success: true, token: token }), { headers: corsHeaders });
+        } else {
+          return new Response(JSON.stringify({ success: false, message: "验证码错误或已失效" }), { status: 401, headers: corsHeaders });
+        }
+      } catch (err) {
+        return new Response(JSON.stringify({ success: false, message: "校验失败" }), { status: 500, headers: corsHeaders });
+      }
+    }
+
+    // 路由 4：保护原有的 /api/esims 增删改查接口
+    if (path === "/api/esims") {
+      // 核心安全逻辑：所有对数据的操作前，必须进行 Token 鉴权
+      const reqToken = request.headers.get("Authorization");
+      if (!reqToken) {
+        return new Response(JSON.stringify({ error: "Unauthorized: Missing Token" }), { status: 401, headers: corsHeaders });
+      }
+      
+      const isValidSession = await env.ESIM_DB.get("session_token_" + reqToken);
+      if (!isValidSession) {
+        return new Response(JSON.stringify({ error: "Unauthorized: Invalid or Expired Token" }), { status: 401, headers: corsHeaders });
       }
 
+      // ========= 以下为原有的正常数据操作流程 =========
       let esims;
       try {
         esims = await env.ESIM_DB.get("esim_list", { type: "json" });
@@ -406,67 +603,53 @@ export default {
         return new Response(JSON.stringify({ error: "KV 未绑定" }), { status: 500, headers: { "Content-Type": "application/json", ...corsHeaders } });
       }
 
+      // GET 获取列表
       if (request.method === "GET") {
-        return new Response(JSON.stringify(esims), {
-          headers: { "Content-Type": "application/json", ...corsHeaders }
-        });
+        return new Response(JSON.stringify(esims), { headers: { "Content-Type": "application/json", ...corsHeaders } });
       }
 
+      // POST 新增
       if (request.method === "POST") {
         try {
           const newSim = await request.json();
-          if (!newSim.name || !newSim.expireDate) {
-            return new Response(JSON.stringify({ success: false, message: "参数错误" }), { status: 400, headers: corsHeaders });
-          }
+          if (!newSim.name || !newSim.expireDate) return new Response(JSON.stringify({ success: false, message: "参数错误" }), { status: 400, headers: corsHeaders });
           newSim.id = Date.now().toString(); 
           esims.push(newSim);
           await env.ESIM_DB.put("esim_list", JSON.stringify(esims)); 
           return new Response(JSON.stringify({ success: true }), { headers: corsHeaders });
-        } catch (err) {
-          return new Response(JSON.stringify({ success: false }), { status: 400, headers: corsHeaders });
-        }
+        } catch (err) { return new Response(JSON.stringify({ success: false }), { status: 400, headers: corsHeaders }); }
       }
 
-      // 新增 [PUT] 方法，用于处理一键续期
+      // PUT 一键续期
       if (request.method === "PUT") {
         try {
           const { id, expireDate } = await request.json();
           let found = false;
           esims = esims.map(sim => {
-            if (sim.id === id) {
-              found = true;
-              return { ...sim, expireDate }; // 只更新到期日期
-            }
+            if (sim.id === id) { found = true; return { ...sim, expireDate }; }
             return sim;
           });
-
-          if (!found) {
-            return new Response(JSON.stringify({ success: false, message: "未找到记录" }), { status: 404, headers: corsHeaders });
-          }
-
+          if (!found) return new Response(JSON.stringify({ success: false, message: "未找到记录" }), { status: 404, headers: corsHeaders });
           await env.ESIM_DB.put("esim_list", JSON.stringify(esims)); 
           return new Response(JSON.stringify({ success: true }), { headers: corsHeaders });
-        } catch (err) {
-          return new Response(JSON.stringify({ success: false }), { status: 400, headers: corsHeaders });
-        }
+        } catch (err) { return new Response(JSON.stringify({ success: false }), { status: 400, headers: corsHeaders }); }
       }
 
+      // DELETE 删除号码
       if (request.method === "DELETE") {
         try {
           const { id } = await request.json();
           esims = esims.filter(sim => sim.id !== id);
           await env.ESIM_DB.put("esim_list", JSON.stringify(esims)); 
           return new Response(JSON.stringify({ success: true }), { headers: corsHeaders });
-        } catch (err) {
-          return new Response(JSON.stringify({ success: false }), { status: 400, headers: corsHeaders });
-        }
+        } catch (err) { return new Response(JSON.stringify({ success: false }), { status: 400, headers: corsHeaders }); }
       }
     }
 
     return new Response("404 Not Found", { status: 404 });
   },
 
-  // 定时任务逻辑 (新增了周期数据显示在 TG 提醒中)
+  // 定时任务逻辑 (每天检查到期情况并推送提醒)
   async scheduled(event, env, ctx) {
     const esims = await env.ESIM_DB.get("esim_list", { type: "json" });
     if (!esims || esims.length === 0) return; 
@@ -485,7 +668,6 @@ export default {
       const diffTime = expDate - localToday;
       const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
       
-      // 显示保号周期文字
       const cycleText = sim.cycle ? `${sim.cycle}天` : '未设置';
 
       if (diffDays <= 15 && diffDays > 0) {
